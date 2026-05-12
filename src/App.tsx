@@ -137,7 +137,6 @@ function AuthScreen({ onAuth }: { onAuth: (user: AuthUser, token: string) => voi
 function App() {
   const navigate = useNavigate()
   const location = useLocation()
-  const isQuizPage = location.pathname.startsWith('/quiz')
 
   const [user, setUser] = useState<AuthUser | null>(() => {
     try {
@@ -182,7 +181,7 @@ function App() {
     if (!activeId || !token) return
     let pollTimer: ReturnType<typeof setTimeout> | null = null
 
-    const loadMessages = async (poll = false) => {
+    const loadMessages = async () => {
       try {
         const res = await fetch(`${API_URL}/sessions/${activeId}/messages`, { headers: authHeaders() })
         if (!res.ok) return
