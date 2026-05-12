@@ -1,5 +1,9 @@
 ﻿import { useState, useRef, useCallback, useEffect } from 'react'
+import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import Markdown from 'react-markdown'
+import QuizCreator from './QuizCreator'
+import MyQuizzes from './MyQuizzes'
+import QuizEdit from './QuizEdit'
 import './App.css'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api'
@@ -26,6 +30,11 @@ interface Session {
   createdAt: number
 }
 
+interface AuthUser {
+  id: number
+  email: string
+}
+
 const HINTS = [
   { icon: 'doc', label: 'Загрузи лекцию', desc: 'и получи краткое содержание' },
   { icon: 'question', label: 'Задай вопрос', desc: 'по материалу документа' },
@@ -38,38 +47,108 @@ function formatSize(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1) + ' МБ'
 }
 
-function createSession(): Session {
-  return {
-    id: crypto.randomUUID(),
-    title: 'Новый чат',
-    messages: [],
-    createdAt: Date.now(),
+function getToken(): string | null {
+  return localStorage.getItem('lecture-ai-token')
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+/* ---- Auth Screen Component ---- */
+function AuthScreen({ onAuth }: { onAuth: (user: AuthUser, token: string) => void }) {
+  const [isLogin, setIsLogin] = useState(true)
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+
+    try {
+      const endpoint = isLogin ? '/auth/login' : '/auth/register'
+      const res = await fetch(`${API_URL}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setError(data.error || 'Ошибка')
+        return
+      }
+      localStorage.setItem('lecture-ai-token', data.token)
+      localStorage.setItem('lecture-ai-user', JSON.stringify(data.user))
+      onAuth(data.user, data.token)
+    } catch {
+      setError('Ошибка соединения с сервером')
+    } finally {
+      setLoading(false)
+    }
   }
+
+  return (
+    <div className="auth-screen">
+      <div className="auth-card">
+        <div className="auth-logo">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+            <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+          </svg>
+          <span>LectureAI</span>
+        </div>
+        <h2>{isLogin ? 'Вход' : 'Регистрация'}</h2>
+        <form onSubmit={handleSubmit} className="auth-form">
+          <input
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+            className="auth-input"
+          />
+          <input
+            type="password"
+            placeholder="Пароль"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+            minLength={6}
+            className="auth-input"
+          />
+          {error && <div className="auth-error">{error}</div>}
+          <button type="submit" className="auth-submit" disabled={loading}>
+            {loading ? 'Загрузка...' : isLogin ? 'Войти' : 'Зарегистрироваться'}
+          </button>
+        </form>
+        <button className="auth-switch" onClick={() => { setIsLogin(!isLogin); setError('') }}>
+          {isLogin ? 'Нет аккаунта? Зарегистрируйтесь' : 'Уже есть аккаунт? Войдите'}
+        </button>
+      </div>
+    </div>
+  )
 }
 
-function loadSessions(): Session[] {
-  try {
-    const raw = localStorage.getItem('lecture-ai-sessions')
-    if (raw) return JSON.parse(raw)
-  } catch { /* ignore */ }
-  return []
-}
-
-function saveSessions(sessions: Session[]) {
-  localStorage.setItem('lecture-ai-sessions', JSON.stringify(sessions))
-}
-
-function loadActiveId(): string | null {
-  return localStorage.getItem('lecture-ai-active')
-}
-
-function saveActiveId(id: string) {
-  localStorage.setItem('lecture-ai-active', id)
-}
-
+/* ---- Main App Component ---- */
 function App() {
-  const [sessions, setSessions] = useState<Session[]>(() => loadSessions())
-  const [activeId, setActiveId] = useState<string | null>(() => loadActiveId())
+  const navigate = useNavigate()
+  const location = useLocation()
+  const isQuizPage = location.pathname.startsWith('/quiz')
+
+  const [user, setUser] = useState<AuthUser | null>(() => {
+    try {
+      const raw = localStorage.getItem('lecture-ai-user')
+      return raw ? JSON.parse(raw) : null
+    } catch { return null }
+  })
+  const [token, setToken] = useState<string | null>(() => getToken())
+
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
   const activeSession = sessions.find((s) => s.id === activeId) ?? null
@@ -83,22 +162,93 @@ function App() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    saveSessions(sessions)
-  }, [sessions])
+  // Load sessions from API on login
+  const fetchSessions = useCallback(async () => {
+    if (!token) return
+    try {
+      const res = await fetch(`${API_URL}/sessions`, { headers: authHeaders() })
+      if (res.status === 401) { handleLogout(); return }
+      const data = await res.json()
+      setSessions(data.map((s: any) => ({ ...s, messages: [], createdAt: new Date(s.createdAt).getTime() })))
+    } catch { /* ignore */ }
+  }, [token])
 
   useEffect(() => {
-    if (activeId) saveActiveId(activeId)
-  }, [activeId])
+    if (user && token) fetchSessions()
+  }, [user, token, fetchSessions])
+
+  // Load messages when switching session
+  useEffect(() => {
+    if (!activeId || !token) return
+    let pollTimer: ReturnType<typeof setTimeout> | null = null
+
+    const loadMessages = async (poll = false) => {
+      try {
+        const res = await fetch(`${API_URL}/sessions/${activeId}/messages`, { headers: authHeaders() })
+        if (!res.ok) return
+        const data = await res.json()
+        const msgs = data.messages.map((m: any) => ({ id: m.id, role: m.role, text: m.text, files: m.files }))
+
+        if (data.pending) {
+          // Show loader while server is still generating
+          const hasLoader = msgs.some((m: any) => m.role === 'assistant' && m.loading)
+          if (!hasLoader) {
+            msgs.push({ id: Date.now(), role: 'assistant', text: 'Генерирую ответ...', loading: true })
+          }
+          pollTimer = setTimeout(() => loadMessages(true), 2000)
+        }
+
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === activeId
+              ? { ...s, messages: msgs }
+              : s
+          )
+        )
+      } catch { /* ignore */ }
+    }
+    // Only load if messages are empty (haven't been loaded yet) or if polling
+    const session = sessions.find((s) => s.id === activeId)
+    if (session && session.messages.length === 0) {
+      loadMessages()
+    }
+
+    return () => {
+      if (pollTimer) clearTimeout(pollTimer)
+    }
+  }, [activeId, token])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const startNewSession = useCallback(() => {
-    const s = createSession()
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem('lecture-ai-token')
+    localStorage.removeItem('lecture-ai-user')
+    setUser(null)
+    setToken(null)
+    setSessions([])
+    setActiveId(null)
+  }, [])
+
+  const handleAuth = useCallback((u: AuthUser, t: string) => {
+    setUser(u)
+    setToken(t)
+  }, [])
+
+  const startNewSession = useCallback(async () => {
+    const id = crypto.randomUUID()
+    const title = 'Новый чат'
+    try {
+      await fetch(`${API_URL}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ id, title }),
+      })
+    } catch { /* ignore */ }
+    const s: Session = { id, title, messages: [], createdAt: Date.now() }
     setSessions((prev) => [s, ...prev])
-    setActiveId(s.id)
+    setActiveId(id)
     setInput('')
     setUploadedDocs([])
   }, [])
@@ -109,7 +259,10 @@ function App() {
     setUploadedDocs([])
   }, [])
 
-  const deleteSession = useCallback((id: string) => {
+  const deleteSession = useCallback(async (id: string) => {
+    try {
+      await fetch(`${API_URL}/sessions/${id}`, { method: 'DELETE', headers: authHeaders() })
+    } catch { /* ignore */ }
     setSessions((prev) => prev.filter((s) => s.id !== id))
     if (activeId === id) {
       const remaining = sessions.filter((s) => s.id !== id)
@@ -117,15 +270,55 @@ function App() {
     }
   }, [activeId, sessions])
 
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
+  const [editingTitle, setEditingTitle] = useState('')
+  const editInputRef = useRef<HTMLInputElement>(null)
+
+  const startRenaming = useCallback((id: string, currentTitle: string) => {
+    setEditingSessionId(id)
+    setEditingTitle(currentTitle)
+    setTimeout(() => editInputRef.current?.focus(), 0)
+  }, [])
+
+  const commitRename = useCallback(async () => {
+    if (!editingSessionId) return
+    const trimmed = editingTitle.trim()
+    if (!trimmed) {
+      setEditingSessionId(null)
+      return
+    }
+    try {
+      await fetch(`${API_URL}/sessions/${editingSessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ title: trimmed }),
+      })
+    } catch { /* ignore */ }
+    setSessions((prev) =>
+      prev.map((s) => (s.id === editingSessionId ? { ...s, title: trimmed } : s))
+    )
+    setEditingSessionId(null)
+  }, [editingSessionId, editingTitle])
+
+  const cancelRename = useCallback(() => {
+    setEditingSessionId(null)
+  }, [])
+
   const generateSessionTitle = useCallback(async (sessionId: string, firstMessage: string) => {
     try {
       const res = await fetch(`${API_URL}/title`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ message: firstMessage }),
       })
       const data = await res.json()
       if (data.title) {
+        // Update in API
+        await fetch(`${API_URL}/sessions/${sessionId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ title: data.title }),
+        })
         setSessions((prev) =>
           prev.map((s) => (s.id === sessionId ? { ...s, title: data.title } : s))
         )
@@ -173,18 +366,30 @@ function App() {
     // Auto-create session if none active
     let currentSessionId = activeId
     if (!currentSessionId) {
-      const s = createSession()
+      const id = crypto.randomUUID()
+      const title = 'Новый чат'
+      try {
+        await fetch(`${API_URL}/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ id, title }),
+        })
+      } catch { /* ignore */ }
+      const s: Session = { id, title, messages: [], createdAt: Date.now() }
       setSessions((prev) => [s, ...prev])
-      setActiveId(s.id)
-      currentSessionId = s.id
+      setActiveId(id)
+      currentSessionId = id
     }
 
     const isFirstMessage = (sessions.find((s) => s.id === currentSessionId)?.messages.length ?? 0) === 0
 
+    const docsToSend = [...uploadedDocs]
+    const displayText = trimmed || (docsToSend.length > 0 ? docsToSend.map((d) => d.filename).join(', ') : '')
+
     const userMsg: Message = {
       id: Date.now(),
       role: 'user',
-      text: trimmed,
+      text: displayText,
       files: uploadedDocs.map((d) => ({ name: d.filename, size: d.size })),
     }
 
@@ -207,7 +412,6 @@ function App() {
 
     updateMessages((prev) => [...prev, userMsg, loadingMsg])
     setInput('')
-    const docsToSend = [...uploadedDocs]
     setUploadedDocs([])
     setIsLoading(true)
 
@@ -232,8 +436,8 @@ function App() {
 
       const chatRes = await fetch(`${API_URL}/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ message, displayText, sessionId: currentSessionId, files: docsToSend.map((d) => ({ name: d.filename, size: d.size })) }),
       })
 
       if (!chatRes.ok) {
@@ -311,6 +515,10 @@ function App() {
 
   const hasMessages = messages.length > 0
 
+  if (!user || !token) {
+    return <AuthScreen onAuth={handleAuth} />
+  }
+
   return (
     <div className={`app-layout ${sidebarOpen ? 'sidebar-open' : ''}`}>
       {/* Sidebar */}
@@ -328,20 +536,53 @@ function App() {
           </button>
         </div>
 
-        <button className="new-chat-btn" onClick={startNewSession}>
+        <button className="new-chat-btn" onClick={() => { startNewSession(); navigate('/') }}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           Новый чат
         </button>
+
+        <div className="sidebar-nav">
+          <button className={`sidebar-nav-btn ${location.pathname === '/quiz/create' ? 'active' : ''}`} onClick={() => navigate('/quiz/create')}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            Создать квиз
+          </button>
+          <button className={`sidebar-nav-btn ${location.pathname === '/quiz/my' ? 'active' : ''}`} onClick={() => navigate('/quiz/my')}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            Мои квизы
+          </button>
+        </div>
 
         <div className="sessions-list">
           {sessions.map((s) => (
             <div
               key={s.id}
               className={`session-item ${s.id === activeId ? 'active' : ''}`}
-              onClick={() => switchSession(s.id)}
+              onClick={() => { switchSession(s.id); navigate('/') }}
             >
               <svg className="session-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-              <span className="session-title">{s.title}</span>
+              {editingSessionId === s.id ? (
+                <input
+                  ref={editInputRef}
+                  className="session-title-input"
+                  value={editingTitle}
+                  onChange={(e) => setEditingTitle(e.target.value)}
+                  onBlur={commitRename}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitRename()
+                    if (e.key === 'Escape') cancelRename()
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <span className="session-title" onDoubleClick={(e) => { e.stopPropagation(); startRenaming(s.id, s.title) }}>{s.title}</span>
+              )}
+              <button
+                className="session-rename"
+                onClick={(e) => { e.stopPropagation(); startRenaming(s.id, s.title) }}
+                aria-label="Rename session"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              </button>
               <button
                 className="session-delete"
                 onClick={(e) => { e.stopPropagation(); deleteSession(s.id) }}
@@ -354,8 +595,13 @@ function App() {
         </div>
 
         <div className="sidebar-footer">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-          <span>created by <strong>685r1</strong></span>
+          <div className="sidebar-user">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            <span className="sidebar-email">{user.email}</span>
+          </div>
+          <button className="logout-btn" onClick={handleLogout} aria-label="Logout">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          </button>
         </div>
       </aside>
 
@@ -378,20 +624,26 @@ function App() {
           )}
         </header>
 
-        <main className="main">
-          {!hasMessages && (
-            <div className="welcome">
-              <div className="welcome-badge">Анализ лекций с ИИ</div>
-              <h1>Чем могу помочь?</h1>
-              <p className="welcome-sub">
-                Загрузите документ с лекцией — я создам краткое содержание, выделю ключевые тезисы или отвечу на вопросы по материалу
-              </p>
-              <div className="hints">
-                {HINTS.map((h) => (
-                  <button key={h.label} className="hint-card" onClick={() => setInput(h.label + ': ')}>
-                    <div className="hint-icon">
-                      {h.icon === 'doc' && (
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        <Routes>
+          <Route path="/quiz/create" element={<main className="main quiz-page-main"><QuizCreator /></main>} />
+          <Route path="/quiz/my" element={<main className="main quiz-page-main"><MyQuizzes /></main>} />
+          <Route path="/quiz/edit/:id" element={<main className="main quiz-page-main"><QuizEdit /></main>} />
+          <Route path="*" element={
+            <>
+              <main className="main">
+                {!hasMessages && (
+                  <div className="welcome">
+                    <div className="welcome-badge">Анализ лекций с ИИ</div>
+                    <h1>Чем могу помочь?</h1>
+                    <p className="welcome-sub">
+                      Загрузите документ с лекцией — я создам краткое содержание, выделю ключевые тезисы или отвечу на вопросы по материалу
+                    </p>
+                    <div className="hints">
+                      {HINTS.map((h) => (
+                        <button key={h.label} className="hint-card" onClick={() => setInput(h.label + ': ')}>
+                          <div className="hint-icon">
+                            {h.icon === 'doc' && (
+                              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
                       )}
                       {h.icon === 'question' && (
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -507,6 +759,9 @@ function App() {
           </div>
           <span className="input-hint">LectureAI может допускать ошибки. Проверяйте важную информацию.</span>
         </div>
+            </>
+          } />
+        </Routes>
       </div>
     </div>
   )
