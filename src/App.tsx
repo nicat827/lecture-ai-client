@@ -194,7 +194,7 @@ function App() {
           if (!hasLoader) {
             msgs.push({ id: Date.now(), role: 'assistant', text: 'Генерирую ответ...', loading: true })
           }
-          pollTimer = setTimeout(() => loadMessages(true), 2000)
+          pollTimer = setTimeout(() => loadMessages(), 2000)
         }
 
         setSessions((prev) =>
